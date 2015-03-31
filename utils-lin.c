@@ -21,14 +21,17 @@
 #define READ  0
 #define WRITE 1
 
+static char *get_word(word_t *s);
+static void redirect(simple_command_t *s);
+
 /**
  * Internal change-directory command.
  */
 static bool shell_cd(word_t *dir)
 {
   /* TODO execute cd */
-
-  return 0;
+  int rc = chdir(get_word(dir));
+  return rc;
 }
 
 /**
@@ -163,20 +166,32 @@ static int parse_fsimple(simple_command_t *s, int level, command_t *father) {
   char *word = get_word(s->verb);
   if (strcmp(word, "exit") == 0 || strcmp(word, "quit") == 0) {
     int rc = shell_exit();
-    free(word);
     exit(rc);
   }
 
   if (strcmp(word, "cd") == 0) {
+    int stdin_copy  = dup(0);
+    int stdout_copy = dup(1);
+    int stderr_copy = dup(2);
+    redirect(s);
     int rc = shell_cd(s->params);
-    free(word);
+    if (rc < 0) {
+      fprintf(stderr, "error cd\n");
+      exit(EXIT_FAILURE);
+    }
+    dup2(stdin_copy,  0);
+    dup2(stdout_copy, 1);
+    dup2(stderr_copy, 2);
+    close(stdin_copy);
+    close(stdout_copy);
+    close(stderr_copy);
     return rc;
   }
 
   /* If variable assignment, execute the assignment and return the exit status */
   word_t *next_part = s->verb->next_part;
   if (next_part != NULL && strcmp(next_part->string, "=") == 0) {
-    int rc = setenv(s->verb->string, get_word(next_part->next_part), 0);
+    int rc = setenv(s->verb->string, get_word(next_part->next_part), 1);
     if (rc < 0) {
       fprintf(stderr, "error setenv(%s, %s, 0)\n", s->verb->string,
         get_word(next_part->next_part));
@@ -195,69 +210,11 @@ static int parse_fsimple(simple_command_t *s, int level, command_t *father) {
       int size;
       char **argv = get_argv(s, &size);
 
-      if (s->out != NULL) {
-        int out_fd;
-        if (s->io_flags == 0) {
-          out_fd = open(get_word(s->out), O_WRONLY | O_CREAT | O_TRUNC, 0664);
-        } else if (s->io_flags == 1) {
-          out_fd = open(get_word(s->out), O_APPEND | O_CREAT, 0664);
-        } else {
-          fprintf(stderr, "flags = %d\n", s->io_flags);
-          exit(EXIT_FAILURE);
-        }
-
-        if (out_fd < 0) {
-          fprintf(stderr, "could not open out file %s\n", get_word(s->out));
-          exit(EXIT_FAILURE);
-        }
-
-        int rc = dup2(out_fd, STDOUT_FILENO);
-        if (rc < 0) {
-          fprintf(stderr, "could not dup2\n");
-          exit(EXIT_FAILURE);
-        }
-      }
-
-      if (s->err != NULL) {
-        int err_fd;
-        if (s->io_flags == 0) {
-          err_fd = open(get_word(s->err), O_WRONLY | O_CREAT | O_TRUNC, 0664);
-        } else if (s->io_flags == 1) {
-          err_fd = open(get_word(s->err), O_APPEND | O_CREAT, 0664);
-        } else {
-          fprintf(stderr, "flags = %d\n", s->io_flags);
-          exit(EXIT_FAILURE);
-        }
-
-        if (err_fd < 0) {
-          fprintf(stderr, "could not open err file %s\n", get_word(s->err));
-          exit(EXIT_FAILURE);
-        }
-
-        int rc = dup2(err_fd, STDERR_FILENO);
-        if (rc < 0) {
-          fprintf(stderr, "could not dup2\n");
-          exit(EXIT_FAILURE);
-        }
-      }
-
-      if (s->in != NULL) {
-        int in_fd = open(get_word(s->in), O_RDONLY);
-        if (in_fd < 0) {
-          fprintf(stderr, "could not open input file %s\n", get_word(s->in));
-          exit(EXIT_FAILURE);
-        }
-
-        int rc = dup2(in_fd, STDIN_FILENO);
-        if (rc < 0) {
-          fprintf(stderr, "coudld not dup2\n");
-          exit(EXIT_FAILURE);
-        }
-      }
+      redirect(s);
 
       execvp(cmd, (char *const *)argv);
 
-      fprintf(stderr, "error execvp child\n");
+      fprintf(stderr, "Execution failed for '%s'\n", cmd);
       exit(EXIT_FAILURE);
     } default: {
       break;
@@ -310,31 +267,33 @@ int parse_command(command_t *c, int level, command_t *father) {
   }
 
   switch (c->op) {
-  case OP_SEQUENTIAL:
-    /* TODO execute the commands one after the other */
-    break;
-
-  case OP_PARALLEL:
-    /* TODO execute the commands simultaneously */
-    break;
-
-  case OP_CONDITIONAL_NZERO:
-    /* TODO execute the second command only if the first one
-                 * returns non zero */
-    break;
-
-  case OP_CONDITIONAL_ZERO:
-    /* TODO execute the second command only if the first one
-                 * returns zero */
-    break;
-
-  case OP_PIPE:
-    /* TODO redirect the output of the first command to the
-     * input of the second */
-    break;
-
-  default:
-    assert(false);
+    case OP_SEQUENTIAL: {
+      /* TODO execute the commands one after the other */
+      int rc = parse_command(c->cmd1, level+1, c);
+      rc = parse_command(c->cmd2, level+1, c);
+      return rc;
+    } case OP_PARALLEL: {
+      /* TODO execute the commands simultaneously */
+      break;
+    } case OP_CONDITIONAL_NZERO: {
+      int rc = parse_command(c->cmd1, level+1, c);
+      if (rc != 0) {
+        rc = parse_command(c->cmd2, level+1, c);
+      }
+      return rc;
+    } case OP_CONDITIONAL_ZERO: {
+      int rc = parse_command(c->cmd1, level+1, c);
+      if (rc == 0) {
+        rc = parse_command(c->cmd2, level+1, c);
+      }
+      return rc;
+    } case OP_PIPE: {
+      /* TODO redirect the output of the first command to the
+       * input of the second */
+      break;
+    } default: {
+      assert(false);
+    }
   }
 
   return 0; /* TODO replace with actual exit code of command */
@@ -389,4 +348,72 @@ char *read_line()
   free(chunk);
 
   return instr;
+}
+
+static void redirect(simple_command_t *s) {
+  int out_fd;
+  if (s->out != NULL) {
+    if (s->io_flags == 0) {
+      out_fd = open(get_word(s->out), O_WRONLY | O_CREAT | O_TRUNC, 0664);
+    } else if (s->io_flags == 1) {
+      out_fd = open(get_word(s->out), O_WRONLY | O_APPEND | O_CREAT, 0664);
+    } else {
+      fprintf(stderr, "flags = %d\n", s->io_flags);
+      exit(EXIT_FAILURE);
+    }
+
+    if (out_fd < 0) {
+      fprintf(stderr, "could not open out file %s\n", get_word(s->out));
+      exit(EXIT_FAILURE);
+    }
+
+    int rc = dup2(out_fd, STDOUT_FILENO);
+    if (rc < 0) {
+      fprintf(stderr, "could not dup2\n");
+      exit(EXIT_FAILURE);
+    }
+  }
+  
+  if (s->err != NULL) {
+    int err_fd;
+    if (s->io_flags == 0) {
+      if (s->out != NULL && strcmp(get_word(s->err), get_word(s->out)) == 0) {
+        err_fd = out_fd;
+      } else {
+        err_fd = open(get_word(s->err), O_WRONLY | O_CREAT | O_TRUNC, 0664);
+      }
+    } else if (s->io_flags == 1) {
+      err_fd = open(get_word(s->err), O_WRONLY | O_APPEND | O_CREAT, 0664);
+    } else if (s->io_flags == 2) {
+      err_fd = open(get_word(s->err), O_WRONLY | O_APPEND | O_CREAT, 0664);
+    } else {
+      fprintf(stderr, "flags = %d\n", s->io_flags);
+      exit(EXIT_FAILURE);
+    }
+
+    if (err_fd < 0) {
+      fprintf(stderr, "could not open err file %s\n", get_word(s->err));
+      exit(EXIT_FAILURE);
+    }
+
+    int rc = dup2(err_fd, STDERR_FILENO);
+    if (rc < 0) {
+      fprintf(stderr, "could not dup2\n");
+      exit(EXIT_FAILURE);
+    }
+  }
+
+  if (s->in != NULL) {
+    int in_fd = open(get_word(s->in), O_RDONLY);
+    if (in_fd < 0) {
+      fprintf(stderr, "could not open input file %s\n", get_word(s->in));
+      exit(EXIT_FAILURE);
+    }
+
+    int rc = dup2(in_fd, STDIN_FILENO);
+    if (rc < 0) {
+      fprintf(stderr, "coudld not dup2\n");
+      exit(EXIT_FAILURE);
+    }
+  }
 }
