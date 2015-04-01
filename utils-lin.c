@@ -13,6 +13,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -237,57 +238,29 @@ static int parse_fsimple(simple_command_t *s, int level, command_t *father) {
 static bool do_in_parallel(command_t *cmd1, command_t *cmd2, int level, command_t *father)
 {
   /* TODO execute cmd1 and cmd2 simultaneously */
-  if (cmd1->op != OP_NONE || cmd2->op != OP_NONE) {
-    fprintf(stderr, "only single commands in parallel\n");
-    exit(EXIT_FAILURE);
-  }
-
-  if (cmd1->scmd == NULL || cmd2->scmd == NULL) {
-    fprintf(stderr, "scmd is NULL\n");
-    exit(EXIT_FAILURE);
-  }
-
-  simple_command_t *scmd1 = cmd1->scmd;
-  simple_command_t *scmd2 = cmd2->scmd;
 
   /* External command */
   int pid1 = fork();
-  int pid2 = fork();
   switch(pid1) {
     case -1: {
       fprintf(stderr, "error forking pid1\n");
       return EXIT_FAILURE;
     } case 0: {
-      char *cmd = get_word(scmd1->verb);
-      int size;
-      char **argv = get_argv(scmd1, &size);
-
-      redirect(scmd1);
-
-      execvp(cmd, (char *const *)argv);
-
-      fprintf(stderr, "Execution failed for '%s'\n", cmd);
-      exit(EXIT_FAILURE);
+      parse_command(cmd1, level + 1, father);
+      exit(EXIT_SUCCESS);
     } default: {
       break;
     }
   }
 
+  int pid2 = fork();
   switch(pid2) {
     case -1: {
       fprintf(stderr, "error forking pid2\n");
       return EXIT_FAILURE;
     } case 0: {
-      char *cmd = get_word(scmd2->verb);
-      int size;
-      char **argv = get_argv(scmd2, &size);
-
-      redirect(scmd2);
-
-      execvp(cmd, (char *const *)argv);
-
-      fprintf(stderr, "Execution failed for '%s'\n", cmd);
-      exit(EXIT_FAILURE);
+      parse_command(cmd2, level + 1, father);
+      exit(EXIT_SUCCESS);
     } default: {
       break;
     }
@@ -313,7 +286,60 @@ static bool do_in_parallel(command_t *cmd1, command_t *cmd2, int level, command_
  */
 static bool do_on_pipe(command_t *cmd1, command_t *cmd2, int level, command_t *father)
 {
-  /* TODO redirect the output of cmd1 to the input of cmd2 */
+  int fd[2];
+  if (pipe(fd) != 0) {
+    fprintf(stderr, "error pipe\n");
+    exit(EXIT_FAILURE);
+  }
+
+  int pid1 = fork();
+  switch(pid1) {
+    case -1: {
+      fprintf(stderr, "error forking pid1\n");
+      return EXIT_FAILURE;
+    } case 0: {
+      close(fd[0]);
+      close(1);
+      dup(fd[1]);
+
+      parse_command(cmd1, level+1, father);
+      exit(EXIT_SUCCESS);
+    } default: {
+      break;
+    }
+  }
+
+  int pid2 = fork();
+  switch(pid2) {
+    case -1: {
+      fprintf(stderr, "error forking pid2\n");
+      return EXIT_FAILURE;
+    } case 0: {
+      close(fd[1]);
+      close(0);
+      dup(fd[0]);
+
+      parse_command(cmd2, level+1, father);
+      exit(EXIT_SUCCESS);
+    } default: {
+      break;
+    }
+  }
+
+  close(fd[0]);
+  close(fd[1]);
+
+  int status1, status2;
+  waitpid(pid1, &status1, 0);
+  if (!WIFEXITED(status1)) {
+    printf("Child 1 %d terminated abnormally, with code %d\n",
+      pid1, WEXITSTATUS(status1));
+  }
+  waitpid(pid2, &status2, 0);
+  if (!WIFEXITED(status2)) {
+    printf("Child 2 %d terminated abnormally, with code %d\n",
+      pid2, WEXITSTATUS(status2));
+  }
 
   return true; /* TODO replace with actual exit status */
 }
@@ -329,7 +355,7 @@ int parse_command(command_t *c, int level, command_t *father) {
 
   if (c->op == OP_NONE) {
     /* Execute a simple command */
-    int rc = parse_fsimple(c->scmd, 0, c);
+    int rc = parse_fsimple(c->scmd, level+1, c);
     return rc;
   }
 
@@ -358,7 +384,8 @@ int parse_command(command_t *c, int level, command_t *father) {
     } case OP_PIPE: {
       /* TODO redirect the output of the first command to the
        * input of the second */
-      break;
+      do_on_pipe(c->cmd1, c->cmd2, level+1, c);
+      return 0;
     } default: {
       assert(false);
     }
