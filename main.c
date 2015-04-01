@@ -1,8 +1,9 @@
-/**
- * Operating Sytems 2013 - Assignment 2
+/******************************************************************************
+ * Mini Shell in Linux
  *
- */
-
+ * Author: Razvan Madalin MATEI <matei.rm94@gmail.com>
+ * Date last modified: April 2015
+ *****************************************************************************/
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -28,8 +29,9 @@ void start_shell() {
 
     root = NULL;
     line = read_line();
-    if (line == NULL)
+    if (line == NULL) {
       return;
+    }
     parse_line(line, &root);
 
     if (root != NULL) {

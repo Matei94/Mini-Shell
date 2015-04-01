@@ -1,7 +1,9 @@
-/**
- * Operating Sytems 2013 - Assignment 2
+/******************************************************************************
+ * Mini Shell in Linux - API
  *
- */
+ * Author: Razvan Madalin MATEI <matei.rm94@gmail.com>
+ * Date last modified: April 2015
+ *****************************************************************************/
 
 #ifndef _UTILS_H
 #define _UTILS_H
@@ -12,6 +14,8 @@
 #define ERR_ALLOCATION "unable to allocate memory"
 
 #define SHELL_EXIT -100
+
+#define IO_MODE 0664
 
 /**
  * Readline from mini-shell.

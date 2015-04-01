@@ -1,7 +1,9 @@
-/**
- * Operating Sytems 2013 - Assignment 2
+/******************************************************************************
+ * Mini Shell in Linux - API implementation
  *
- */
+ * Author: Razvan Madalin MATEI <matei.rm94@gmail.com>
+ * Date last modified: April 2015
+ *****************************************************************************/
 
 #include <assert.h>
 
@@ -13,43 +15,449 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 
-#define _GNU_SOURCE
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "minternals.h"
 #include "utils.h"
 
-#define READ  0
-#define WRITE 1
 
-static char *get_word(word_t *s);
-static void redirect(simple_command_t *s);
+
+/* Declarations */
+static int  shell_exit ();
+static bool shell_cd   (word_t *dir);
+
+static int  do_simple     (simple_command_t *s, int level, 
+                           command_t *father);
+static int  do_in_parallel(command_t *cmd1, command_t *cmd2, int level, 
+                           command_t *father);
+static bool do_on_pipe    (command_t *cmd1, command_t *cmd2, int level,
+                           command_t *father);
+
+static void redirect_all (simple_command_t *s);
+static void redirect_in  (simple_command_t *s);
+static void redirect_out (simple_command_t *s);
+static void redirect_err (simple_command_t *s);
+
+static char  *get_word (word_t *s);
+static char **get_argv (simple_command_t *command, int *size);
+
+
 
 /**
- * Internal change-directory command.
+ * Readline from mini-shell.
  */
-static bool shell_cd(word_t *dir)
-{
-  /* TODO execute cd */
-  int rc = chdir(get_word(dir));
-  return rc;
+char *read_line() {
+  char *instr;
+  char *chunk;
+  char *ret;
+
+  int instr_length;
+  int chunk_length;
+
+  int endline = 0;
+
+  instr = NULL;
+  instr_length = 0;
+
+  chunk = calloc(CHUNK_SIZE, sizeof(char));
+  if (chunk == NULL) {
+    fprintf(stderr, ERR_ALLOCATION);
+    return instr;
+  }
+
+  while (!endline) {
+    ret = fgets(chunk, CHUNK_SIZE, stdin);
+    if (ret == NULL) {
+      break;
+    }
+
+    chunk_length = strlen(chunk);
+    if (chunk[chunk_length - 1] == '\n') {
+      chunk[chunk_length - 1] = 0;
+      endline = 1;
+    }
+
+    ret = instr;
+    instr = realloc(instr, instr_length + CHUNK_SIZE + 1);
+    if (instr == NULL) {
+      free(ret);
+      return instr;
+    }
+    memset(instr + instr_length, 0, CHUNK_SIZE);
+    strcat(instr, chunk);
+    instr_length += chunk_length;
+  }
+
+  free(chunk);
+
+  return instr;
 }
+
+/**
+ * Parse and execute a command.
+ */
+int parse_command(command_t *c, int level, command_t *father) {
+  if (c == NULL) {
+    mfatal("c is NULL");
+  }
+
+  if (c->op == OP_NONE) {
+    /* Execute a simple command */
+    int rc = do_simple(c->scmd, level+1, c);
+    return rc;
+  }
+
+  switch (c->op) {
+    case OP_SEQUENTIAL: {
+      /* Execute the commands one after the other */
+      int rc = parse_command(c->cmd1, level+1, c);
+      rc = parse_command(c->cmd2, level+1, c);
+      return rc;
+    } case OP_PARALLEL: {
+      /* Execute the commands simultaneously */
+      int rc = do_in_parallel(c->cmd1, c->cmd2, level+1, c);
+      return rc;
+    } case OP_CONDITIONAL_NZERO: {
+      int rc = parse_command(c->cmd1, level+1, c);
+      if (rc != 0) {
+        rc = parse_command(c->cmd2, level+1, c);
+      }
+      return rc;
+    } case OP_CONDITIONAL_ZERO: {
+      int rc = parse_command(c->cmd1, level+1, c);
+      if (rc == 0) {
+        rc = parse_command(c->cmd2, level+1, c);
+      }
+      return rc;
+    } case OP_PIPE: {
+      /* TODO redirect the output of the first command to the
+       * input of the second */
+      int rc = do_on_pipe(c->cmd1, c->cmd2, level+1, c);
+      return rc;
+    } default: {
+      assert(false);
+    }
+  }
+
+  return EXIT_FAILURE;
+}
+
+
 
 /**
  * Internal exit/quit command.
  */
-static int shell_exit()
-{
-  /* TODO execute exit/quit */
+static int shell_exit() {
+  return SHELL_EXIT;
+}
 
-  return 0; /* TODO replace with actual exit code */
+/**
+ * Internal change-directory command.
+ */
+static bool shell_cd(word_t *dir) {
+  char *dir_name = get_word(dir);
+  int rc = chdir(dir_name);
+  free(dir_name);
+  if (rc != 0) {
+    perror("Could not change directory");
+    exit(EXIT_FAILURE);
+  }
+  return rc;
+}
+
+/**
+ * Execute a simple command (internal, environment variable assignment,
+ * external command).
+ */
+static int do_simple(simple_command_t *s, int level, command_t *father) {
+  /* Sanity checks */
+  if (s == NULL) {
+    mfatal("s is NULL");
+  }
+  if (father->cmd1 != NULL) {
+    mfatal("cmd1 not NULL");
+  }
+  if (father->cmd2 != NULL) {
+    mfatal("cmd2 not NULL");
+  }
+
+  /* If builtin command, execute the command */
+  char *word = get_word(s->verb);
+  if (strcmp(word, "exit") == 0 || strcmp(word, "quit") == 0) {
+    free(word);
+    return shell_exit();
+  }
+
+  if (strcmp(word, "cd") == 0) {
+    /* Save context */
+    int stdin_copy  = dup(0);
+    int stdout_copy = dup(1);
+    int stderr_copy = dup(2);
+
+    redirect_all(s);
+    int rc = shell_cd(s->params);
+
+    /* Restore context */
+    dup2(stdin_copy,  0);
+    dup2(stdout_copy, 1);
+    dup2(stderr_copy, 2);
+    close(stdin_copy);
+    close(stdout_copy);
+    close(stderr_copy);
+
+    free(word);
+    return rc;
+  }
+
+  /* If variable assignment, execute the assignment */
+  word_t *next_part = s->verb->next_part;
+  if (next_part != NULL && strcmp(next_part->string, "=") == 0) {
+    /* Add or overwrite if exists */
+    char *value = get_word(next_part->next_part);
+    int rc = setenv(s->verb->string, value, 1);
+    if (rc < 0) {
+       perror("Could not set environment variable");
+       exit(EXIT_FAILURE);
+    }
+
+    free(value);
+    free(word);
+    return rc;
+  }
+
+  /* External command */
+  int pid = fork();
+  switch(pid) {
+    case -1: { /* Fork error */
+      perror("Could not fork");
+      free(word);
+      exit(EXIT_FAILURE);
+    } case 0: { /* Child */
+      char *cmd = get_word(s->verb);
+      int size;
+      char **argv = get_argv(s, &size);
+
+      redirect_all(s);
+
+      execvp(cmd, (char *const *)argv);
+
+      fprintf(stderr, "Execution failed for '%s'\n", cmd);
+      exit(EXIT_FAILURE);
+    } default: { /* Parent */
+      break;
+    }
+  }
+
+  /* Wait for child */
+  int status;
+  waitpid(pid, &status, 0);
+
+  free(word);
+  return status;
+}
+
+/**
+ * Process two commands in parallel, by creating two children.
+ */
+static int do_in_parallel(command_t *cmd1, command_t *cmd2, int level,
+    command_t *father) {
+  /* First command */
+  int pid1 = fork();
+  switch(pid1) {
+    case -1: { /* Fork error */
+      perror("Could not fork");
+      exit(EXIT_FAILURE);
+    } case 0: { /* Child */
+      int rc = parse_command(cmd1, level + 1, father);
+      exit(rc);
+    } default: { /* Parent */
+      break;
+    }
+  }
+
+  /* Second command */
+  int pid2 = fork();
+  switch(pid2) {
+    case -1: {/* Fork error */
+      perror("Could not fork");
+      exit(EXIT_FAILURE);
+    } case 0: { /* Child */
+      int rc = parse_command(cmd2, level + 1, father);
+      exit(rc);
+    } default: { /* Parent */
+      break;
+    }
+  }
+
+  /* Wait for childs */
+  int status1, status2;
+  waitpid(pid1, &status1, 0);
+  waitpid(pid2, &status2, 0);
+
+  return status2;
+}
+
+/**
+ * Run commands by creating an anonymous pipe (cmd1 | cmd2)
+ */
+static bool do_on_pipe(command_t *cmd1, command_t *cmd2, int level,
+    command_t *father) {
+  /* Create pipe */
+  int fd[2];
+  if (pipe(fd) != 0) {
+    fprintf(stderr, "error pipe\n");
+    exit(EXIT_FAILURE);
+  }
+
+  /* First command */
+  int pid1 = fork();
+  switch(pid1) {
+    case -1: { /* Fork error */
+      perror("Could not fork");
+      exit(EXIT_FAILURE);
+    } case 0: { /* Child */
+      close(fd[0]);         /* Close unused read end */
+      close(STDOUT_FILENO); /* Close stdout */
+      dup(fd[1]);           /* Set write end of pipe as stdout */
+
+      int rc = parse_command(cmd1, level+1, father);
+      exit(rc);
+    } default: { /* Parent */
+      break;
+    }
+  }
+
+  int pid2 = fork();
+  switch(pid2) {
+    case -1: { /* Fork error */
+      perror("Could not fork");
+      exit(EXIT_FAILURE);
+    } case 0: { /* Child */
+      close(fd[1]);        /* Close unused write end */
+      close(STDIN_FILENO); /* Close stdin */
+      dup(fd[0]);          /* Set read end of pipe as stdin */
+
+      int rc = parse_command(cmd2, level+1, father);
+      exit(rc);
+    } default: { /* Parent */
+      break;
+    }
+  }
+
+  close(fd[0]); /* Close unused read end */
+  close(fd[1]); /* Close unused write end */
+
+  /* Wait for childs */
+  int status1, status2;
+  waitpid(pid1, &status1, 0);
+  waitpid(pid2, &status2, 0);
+
+  return status2;
+}
+
+/**
+ * Redirect input, output and error of s
+ */
+static void redirect_all(simple_command_t *s) {
+  redirect_in(s);
+  redirect_out(s);
+  redirect_err(s);  
+}
+
+/**
+ * Redirect input of s
+ */
+static void redirect_in(simple_command_t *s) {
+  if (s->in != NULL) {
+    char *filename = get_word(s->in);
+    int in_fd = open(filename, O_RDONLY);
+    free(filename);
+    if (in_fd < 0) {
+      perror("Could not open input file");
+      exit(EXIT_FAILURE);
+    }
+
+    int rc = dup2(in_fd, STDIN_FILENO);
+    if (rc < 0) {
+      perror("Could not duplicate STDIN_FILENO");
+      exit(EXIT_FAILURE);
+    }
+  }
+}
+
+/**
+ * Redirect output of s
+ */
+static void redirect_out(simple_command_t *s) {
+  if (s->out != NULL) {
+    int out_fd;
+    char *filename = get_word(s->out);
+    if (s->io_flags == IO_REGULAR) {
+      out_fd = open(filename, O_WRONLY | O_TRUNC  | O_CREAT, IO_MODE);
+      free(filename);
+    } else if (s->io_flags == IO_OUT_APPEND) {
+      out_fd = open(filename, O_WRONLY | O_APPEND | O_CREAT, IO_MODE);
+      free(filename);
+    } else {
+      free(filename);
+      mfatal("out io_flags = %d", s->io_flags);
+    }
+
+    if (out_fd < 0) {
+      perror("Could not open output file");
+      exit(EXIT_FAILURE);
+    }
+
+    int rc = dup2(out_fd, STDOUT_FILENO);
+    if (rc < 0) {
+      perror("Could not duplicate STDOUT_FILENO");
+      exit(EXIT_FAILURE);
+    }
+  }
+}
+
+/**
+ * Redirect error of s
+ */
+static void redirect_err(simple_command_t *s) {
+  if (s->err != NULL) {
+    int err_fd;
+    char *filename_err = get_word(s->err);
+    if (s->io_flags == IO_REGULAR) {
+      char *filename_out = get_word(s->out);
+      if (s->out != NULL && strcmp(filename_err, filename_out) == 0) {
+        err_fd = STDOUT_FILENO;
+      } else {
+        err_fd = open(filename_err, O_WRONLY | O_TRUNC | O_CREAT, IO_MODE);
+      }
+      free(filename_err);
+      free(filename_out);
+    } else if (s->io_flags == IO_ERR_APPEND) {
+      err_fd = open(filename_err, O_WRONLY | O_APPEND | O_CREAT, IO_MODE);
+      free(filename_err);
+    } else {
+      free(filename_err);
+      mfatal("Unrecognized io_flags: %d", s->io_flags);
+    }
+
+    if (err_fd < 0) {
+      perror("Could not open error file");
+      exit(EXIT_FAILURE);
+    }
+
+    int rc = dup2(err_fd, STDERR_FILENO);
+    if (rc < 0) {
+      perror("Could not duplicate STDERR_FILENO");
+      exit(EXIT_FAILURE);
+    }
+  }
 }
 
 /**
  * Concatenate parts of the word to obtain the command
  */
-static char *get_word(word_t *s)
-{
+static char *get_word(word_t *s) {
   int string_length = 0;
   int substring_length = 0;
 
@@ -107,8 +515,7 @@ static char *get_word(word_t *s)
  * Concatenate command arguments in a NULL terminated list in order to pass
  * them directly to execv.
  */
-static char **get_argv(simple_command_t *command, int *size)
-{
+static char **get_argv(simple_command_t *command, int *size) {
   char **argv;
   word_t *param;
 
@@ -140,375 +547,4 @@ static char **get_argv(simple_command_t *command, int *size)
   *size = argc;
 
   return argv;
-}
-
-/**
- * Parse a simple command (internal, environment variable assignment,
- * external command).
- */
-static int parse_fsimple(simple_command_t *s, int level, command_t *father) {
-  /* Sanity checks */
-  if (s == NULL) {
-    fprintf(stderr, "error parsing simple command: s is NULL\n");
-    return -1;
-  }
-  if (father->cmd1 != NULL) {
-    fprintf(stderr, "error parsing simple command: "
-      "father->cmd1 is not NULL\n");
-    return -2;
-  }
-  if (father->cmd2 != NULL) {
-    fprintf(stderr, "error parsing simple command: "
-      "father->cmd2 is not NULL\n");
-    return -3;
-  }
-
-  /* If builtin command, execute the command */
-  char *word = get_word(s->verb);
-  if (strcmp(word, "exit") == 0 || strcmp(word, "quit") == 0) {
-    int rc = shell_exit();
-    exit(rc);
-  }
-
-  if (strcmp(word, "cd") == 0) {
-    int stdin_copy  = dup(0);
-    int stdout_copy = dup(1);
-    int stderr_copy = dup(2);
-    redirect(s);
-    int rc = shell_cd(s->params);
-    if (rc < 0) {
-      fprintf(stderr, "error cd\n");
-      exit(EXIT_FAILURE);
-    }
-    dup2(stdin_copy,  0);
-    dup2(stdout_copy, 1);
-    dup2(stderr_copy, 2);
-    close(stdin_copy);
-    close(stdout_copy);
-    close(stderr_copy);
-    return rc;
-  }
-
-  /* If variable assignment, execute the assignment and return the exit status */
-  word_t *next_part = s->verb->next_part;
-  if (next_part != NULL && strcmp(next_part->string, "=") == 0) {
-    int rc = setenv(s->verb->string, get_word(next_part->next_part), 1);
-    if (rc < 0) {
-      fprintf(stderr, "error setenv(%s, %s, 0)\n", s->verb->string,
-        get_word(next_part->next_part));
-    }
-    return rc;
-  }
-
-  /* External command */
-  int pid = fork();
-  switch(pid) {
-    case -1: {
-      fprintf(stderr, "error forking\n");
-      return EXIT_FAILURE;
-    } case 0: {
-      char *cmd = get_word(s->verb);
-      int size;
-      char **argv = get_argv(s, &size);
-
-      redirect(s);
-
-      execvp(cmd, (char *const *)argv);
-
-      fprintf(stderr, "Execution failed for '%s'\n", cmd);
-      exit(EXIT_FAILURE);
-    } default: {
-      break;
-    }
-  }
-
-  int status;
-  waitpid(pid, &status, 0);
-  if (!WIFEXITED(status)) {
-    printf("Child %d terminated abnormally, with code %d\n",
-      pid, WEXITSTATUS(status));
-  }
-
-  return status;
-}
-
-/**
- * Process two commands in parallel, by creating two children.
- */
-static bool do_in_parallel(command_t *cmd1, command_t *cmd2, int level, command_t *father)
-{
-  /* TODO execute cmd1 and cmd2 simultaneously */
-
-  /* External command */
-  int pid1 = fork();
-  switch(pid1) {
-    case -1: {
-      fprintf(stderr, "error forking pid1\n");
-      return EXIT_FAILURE;
-    } case 0: {
-      parse_command(cmd1, level + 1, father);
-      exit(EXIT_SUCCESS);
-    } default: {
-      break;
-    }
-  }
-
-  int pid2 = fork();
-  switch(pid2) {
-    case -1: {
-      fprintf(stderr, "error forking pid2\n");
-      return EXIT_FAILURE;
-    } case 0: {
-      parse_command(cmd2, level + 1, father);
-      exit(EXIT_SUCCESS);
-    } default: {
-      break;
-    }
-  }
-
-  int status1, status2;
-  waitpid(pid1, &status1, 0);
-  if (!WIFEXITED(status1)) {
-    printf("Child 1 %d terminated abnormally, with code %d\n",
-      pid1, WEXITSTATUS(status1));
-  }
-  waitpid(pid2, &status2, 0);
-  if (!WIFEXITED(status2)) {
-    printf("Child 1 %d terminated abnormally, with code %d\n",
-      pid2, WEXITSTATUS(status2));
-  }
-
-  return 0; /* TODO replace with actual exit status */
-}
-
-/**
- * Run commands by creating an anonymous pipe (cmd1 | cmd2)
- */
-static bool do_on_pipe(command_t *cmd1, command_t *cmd2, int level, command_t *father)
-{
-  int fd[2];
-  if (pipe(fd) != 0) {
-    fprintf(stderr, "error pipe\n");
-    exit(EXIT_FAILURE);
-  }
-
-  int pid1 = fork();
-  switch(pid1) {
-    case -1: {
-      fprintf(stderr, "error forking pid1\n");
-      return EXIT_FAILURE;
-    } case 0: {
-      close(fd[0]);
-      close(1);
-      dup(fd[1]);
-
-      parse_command(cmd1, level+1, father);
-      exit(EXIT_SUCCESS);
-    } default: {
-      break;
-    }
-  }
-
-  int pid2 = fork();
-  switch(pid2) {
-    case -1: {
-      fprintf(stderr, "error forking pid2\n");
-      return EXIT_FAILURE;
-    } case 0: {
-      close(fd[1]);
-      close(0);
-      dup(fd[0]);
-
-      parse_command(cmd2, level+1, father);
-      exit(EXIT_SUCCESS);
-    } default: {
-      break;
-    }
-  }
-
-  close(fd[0]);
-  close(fd[1]);
-
-  int status1, status2;
-  waitpid(pid1, &status1, 0);
-  if (!WIFEXITED(status1)) {
-    printf("Child 1 %d terminated abnormally, with code %d\n",
-      pid1, WEXITSTATUS(status1));
-  }
-  waitpid(pid2, &status2, 0);
-  if (!WIFEXITED(status2)) {
-    printf("Child 2 %d terminated abnormally, with code %d\n",
-      pid2, WEXITSTATUS(status2));
-  }
-
-  return true; /* TODO replace with actual exit status */
-}
-
-/**
- * Parse and execute a command.
- */
-int parse_command(command_t *c, int level, command_t *father) {
-  if (c == NULL) {
-    fprintf(stderr, "c is NULL\n");
-    exit(EXIT_FAILURE);
-  }
-
-  if (c->op == OP_NONE) {
-    /* Execute a simple command */
-    int rc = parse_fsimple(c->scmd, level+1, c);
-    return rc;
-  }
-
-  switch (c->op) {
-    case OP_SEQUENTIAL: {
-      /* TODO execute the commands one after the other */
-      int rc = parse_command(c->cmd1, level+1, c);
-      rc = parse_command(c->cmd2, level+1, c);
-      return rc;
-    } case OP_PARALLEL: {
-      do_in_parallel(c->cmd1, c->cmd2, level+1, c);
-      /* TODO execute the commands simultaneously */
-      break;
-    } case OP_CONDITIONAL_NZERO: {
-      int rc = parse_command(c->cmd1, level+1, c);
-      if (rc != 0) {
-        rc = parse_command(c->cmd2, level+1, c);
-      }
-      return rc;
-    } case OP_CONDITIONAL_ZERO: {
-      int rc = parse_command(c->cmd1, level+1, c);
-      if (rc == 0) {
-        rc = parse_command(c->cmd2, level+1, c);
-      }
-      return rc;
-    } case OP_PIPE: {
-      /* TODO redirect the output of the first command to the
-       * input of the second */
-      do_on_pipe(c->cmd1, c->cmd2, level+1, c);
-      return 0;
-    } default: {
-      assert(false);
-    }
-  }
-
-  return 0; /* TODO replace with actual exit code of command */
-}
-
-/**
- * Readline from mini-shell.
- */
-char *read_line()
-{
-  char *instr;
-  char *chunk;
-  char *ret;
-
-  int instr_length;
-  int chunk_length;
-
-  int endline = 0;
-
-  instr = NULL;
-  instr_length = 0;
-
-  chunk = calloc(CHUNK_SIZE, sizeof(char));
-  if (chunk == NULL) {
-    fprintf(stderr, ERR_ALLOCATION);
-    return instr;
-  }
-
-  while (!endline) {
-    ret = fgets(chunk, CHUNK_SIZE, stdin);
-    if (ret == NULL) {
-      break;
-    }
-
-    chunk_length = strlen(chunk);
-    if (chunk[chunk_length - 1] == '\n') {
-      chunk[chunk_length - 1] = 0;
-      endline = 1;
-    }
-
-    ret = instr;
-    instr = realloc(instr, instr_length + CHUNK_SIZE + 1);
-    if (instr == NULL) {
-      free(ret);
-      return instr;
-    }
-    memset(instr + instr_length, 0, CHUNK_SIZE);
-    strcat(instr, chunk);
-    instr_length += chunk_length;
-  }
-
-  free(chunk);
-
-  return instr;
-}
-
-static void redirect(simple_command_t *s) {
-  int out_fd;
-  if (s->out != NULL) {
-    if (s->io_flags == 0) {
-      out_fd = open(get_word(s->out), O_WRONLY | O_CREAT | O_TRUNC, 0664);
-    } else if (s->io_flags == 1) {
-      out_fd = open(get_word(s->out), O_WRONLY | O_APPEND | O_CREAT, 0664);
-    } else {
-      fprintf(stderr, "flags = %d\n", s->io_flags);
-      exit(EXIT_FAILURE);
-    }
-
-    if (out_fd < 0) {
-      fprintf(stderr, "could not open out file %s\n", get_word(s->out));
-      exit(EXIT_FAILURE);
-    }
-
-    int rc = dup2(out_fd, STDOUT_FILENO);
-    if (rc < 0) {
-      fprintf(stderr, "could not dup2\n");
-      exit(EXIT_FAILURE);
-    }
-  }
-  
-  if (s->err != NULL) {
-    int err_fd;
-    if (s->io_flags == 0) {
-      if (s->out != NULL && strcmp(get_word(s->err), get_word(s->out)) == 0) {
-        err_fd = out_fd;
-      } else {
-        err_fd = open(get_word(s->err), O_WRONLY | O_CREAT | O_TRUNC, 0664);
-      }
-    } else if (s->io_flags == 1) {
-      err_fd = open(get_word(s->err), O_WRONLY | O_APPEND | O_CREAT, 0664);
-    } else if (s->io_flags == 2) {
-      err_fd = open(get_word(s->err), O_WRONLY | O_APPEND | O_CREAT, 0664);
-    } else {
-      fprintf(stderr, "flags = %d\n", s->io_flags);
-      exit(EXIT_FAILURE);
-    }
-
-    if (err_fd < 0) {
-      fprintf(stderr, "could not open err file %s\n", get_word(s->err));
-      exit(EXIT_FAILURE);
-    }
-
-    int rc = dup2(err_fd, STDERR_FILENO);
-    if (rc < 0) {
-      fprintf(stderr, "could not dup2\n");
-      exit(EXIT_FAILURE);
-    }
-  }
-
-  if (s->in != NULL) {
-    int in_fd = open(get_word(s->in), O_RDONLY);
-    if (in_fd < 0) {
-      fprintf(stderr, "could not open input file %s\n", get_word(s->in));
-      exit(EXIT_FAILURE);
-    }
-
-    int rc = dup2(in_fd, STDIN_FILENO);
-    if (rc < 0) {
-      fprintf(stderr, "coudld not dup2\n");
-      exit(EXIT_FAILURE);
-    }
-  }
 }
