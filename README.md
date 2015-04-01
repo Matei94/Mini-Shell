@@ -7,7 +7,7 @@ internal commands (`exit`/`quit`, `cd`), environment variables, redirection and
 pipes.
 
 ## Operators (in descending order)
-  * **|** pipe: 'cmd1 | cmd2' will execute `cmd1` with its output redirected to
+  * **|** pipe: `cmd1 | cmd2` will execute `cmd1` with its output redirected to
   the input on `cmd2`
   * **&&** and **||** conditional execution: 'cmd1 | cmd2' will execute `cmd2`
   only if `cmd1` *did* / *did not* return 0
