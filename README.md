@@ -9,7 +9,7 @@ pipes.
 ## Operators (in descending order)
   * **|** pipe: `cmd1 | cmd2` will execute `cmd1` with its output redirected to
   the input on `cmd2`
-  * **&&** and **||** conditional execution: 'cmd1 | cmd2' will execute `cmd2`
+  * **&&** and **||** conditional execution: `cmd1 | cmd2` will execute `cmd2`
   only if `cmd1` *did* / *did not* return 0
   * **&** parallelism: `cmd1 & cmd2` will execute `cmd1` and `cmd2` at the same
   time
@@ -22,7 +22,7 @@ run the internal command, otherwise `fork` and let the child execute the
 command.
 
 Redirection makes use of [dup](http://linux.die.net/man/2/dup) and
-[dup2](http://linux.die.net/man/2/dup2) system calls. Check `redirect` function
+[dup2](http://linux.die.net/man/2/dup2) system calls. Check `redirect_all` function
 in [utils-lin.c](https://github.com/Matei94/Mini-Shell/blob/master/utils-lin.c)
 to see how redirection is handled.
 
