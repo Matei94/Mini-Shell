@@ -31,7 +31,7 @@ source "$TEST_LIB"
 SHELL_PROMPT="> "
 
 # change this of you want to keep the logs after execution
-DO_CLEANUP=no
+DO_CLEANUP=yes
 
 
 
